@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import json
 from datetime import datetime
-from pathlib import Path
+from supabase import create_client
 import anthropic
 import os
 
@@ -14,69 +14,131 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- Persistent Storage ---
-DATA_DIR = Path("data")
-DATA_DIR.mkdir(exist_ok=True)
-SESSIONS_FILE = DATA_DIR / "sessions_index.json"
+# --- Supabase Connection ---
+@st.cache_resource
+def get_supabase_client():
+    """Initialize Supabase client"""
+    url = None
+    key = None
+    try:
+        url = st.secrets.get("SUPABASE_URL")
+        key = st.secrets.get("SUPABASE_KEY")
+    except Exception:
+        pass
+    if not url:
+        url = os.environ.get("SUPABASE_URL")
+    if not key:
+        key = os.environ.get("SUPABASE_KEY")
 
-def get_all_sessions():
-    """Load the list of saved sessions"""
-    if SESSIONS_FILE.exists():
-        with open(SESSIONS_FILE, "r") as f:
-            return json.load(f)
-    return {}
+    if not url or not key:
+        st.error("Supabase credentials not found. Please set SUPABASE_URL and SUPABASE_KEY in your secrets.")
+        st.stop()
 
-def save_sessions_index(sessions):
-    """Save the sessions index"""
-    with open(SESSIONS_FILE, "w") as f:
-        json.dump(sessions, f, indent=2)
+    return create_client(url, key)
 
-def save_session(session_name, projects):
-    """Save a session's projects to a JSON file"""
-    safe_name = session_name.replace(" ", "_").lower()
-    session_file = DATA_DIR / f"session_{safe_name}.json"
+supabase = get_supabase_client()
 
-    session_data = {
-        "session_name": session_name,
-        "projects": projects,
-        "last_modified": datetime.now().isoformat()
-    }
+# --- Database Functions ---
+def db_get_all_sessions():
+    """Load all sessions from Supabase"""
+    try:
+        response = supabase.table("sessions").select("*").order("last_modified", desc=True).execute()
+        return response.data if response.data else []
+    except Exception as e:
+        st.error(f"Failed to load sessions: {str(e)}")
+        return []
 
-    with open(session_file, "w") as f:
-        json.dump(session_data, f, indent=2)
+def db_create_session(session_name):
+    """Create a new session in Supabase"""
+    safe_id = session_name.replace(" ", "_").lower()
+    try:
+        supabase.table("sessions").upsert({
+            "id": safe_id,
+            "name": session_name,
+            "project_count": 0,
+            "last_modified": datetime.now().isoformat()
+        }).execute()
+        return safe_id
+    except Exception as e:
+        st.error(f"Failed to create session: {str(e)}")
+        return None
 
-    # Update sessions index
-    sessions = get_all_sessions()
-    sessions[safe_name] = {
-        "name": session_name,
-        "file": str(session_file),
-        "project_count": len(projects),
-        "last_modified": session_data["last_modified"]
-    }
-    save_sessions_index(sessions)
+def db_load_session_projects(session_id):
+    """Load all projects for a session from Supabase"""
+    try:
+        response = supabase.table("projects").select("*").eq("session_id", session_id).order("created_at").execute()
+        projects = []
+        for row in (response.data or []):
+            projects.append({
+                "db_id": row["id"],
+                "project_name": row["project_name"],
+                "description": row["description"],
+                "tech_feasibility": float(row["tech_feasibility"]),
+                "business_value": float(row["business_value"]),
+                "category": row["category"],
+                "justification": row["justification"],
+                "answers": row["answers"] if row["answers"] else {},
+                "timestamp": row["created_at"]
+            })
+        return projects
+    except Exception as e:
+        st.error(f"Failed to load projects: {str(e)}")
+        return []
 
-def load_session(safe_name):
-    """Load a session's projects from a JSON file"""
-    session_file = DATA_DIR / f"session_{safe_name}.json"
-    if session_file.exists():
-        with open(session_file, "r") as f:
-            data = json.load(f)
-            return data.get("projects", [])
-    return []
+def db_add_project(session_id, project_data):
+    """Add a project to Supabase"""
+    try:
+        supabase.table("projects").insert({
+            "session_id": session_id,
+            "project_name": project_data["project_name"],
+            "description": project_data["description"],
+            "tech_feasibility": project_data["tech_feasibility"],
+            "business_value": project_data["business_value"],
+            "category": project_data["category"],
+            "justification": project_data["justification"],
+            "answers": project_data.get("answers", {})
+        }).execute()
 
-def delete_session(safe_name):
-    """Delete a saved session"""
-    session_file = DATA_DIR / f"session_{safe_name}.json"
-    if session_file.exists():
-        session_file.unlink()
-    sessions = get_all_sessions()
-    sessions.pop(safe_name, None)
-    save_sessions_index(sessions)
+        # Update session project count and timestamp
+        count_resp = supabase.table("projects").select("id", count="exact").eq("session_id", session_id).execute()
+        project_count = count_resp.count if count_resp.count else 0
+        supabase.table("sessions").update({
+            "project_count": project_count,
+            "last_modified": datetime.now().isoformat()
+        }).eq("id", session_id).execute()
 
-def auto_save():
-    """Auto-save current session if a session is active"""
-    if st.session_state.get("current_session_name") and st.session_state.projects:
-        save_session(st.session_state.current_session_name, st.session_state.projects)
+        return True
+    except Exception as e:
+        st.error(f"Failed to add project: {str(e)}")
+        return False
+
+def db_delete_project(project_db_id, session_id):
+    """Delete a project from Supabase"""
+    try:
+        supabase.table("projects").delete().eq("id", project_db_id).execute()
+
+        # Update session project count
+        count_resp = supabase.table("projects").select("id", count="exact").eq("session_id", session_id).execute()
+        project_count = count_resp.count if count_resp.count else 0
+        supabase.table("sessions").update({
+            "project_count": project_count,
+            "last_modified": datetime.now().isoformat()
+        }).eq("id", session_id).execute()
+
+        return True
+    except Exception as e:
+        st.error(f"Failed to delete project: {str(e)}")
+        return False
+
+def db_delete_session(session_id):
+    """Delete a session and all its projects from Supabase"""
+    try:
+        supabase.table("projects").delete().eq("session_id", session_id).execute()
+        supabase.table("sessions").delete().eq("id", session_id).execute()
+        return True
+    except Exception as e:
+        st.error(f"Failed to delete session: {str(e)}")
+        return False
 
 # --- Initialize session state ---
 if 'projects' not in st.session_state:
@@ -85,6 +147,8 @@ if 'current_project' not in st.session_state:
     st.session_state.current_project = {}
 if 'current_session_name' not in st.session_state:
     st.session_state.current_session_name = None
+if 'current_session_id' not in st.session_state:
+    st.session_state.current_session_id = None
 
 # Benchmark use cases for reference
 BENCHMARK_USE_CASES = {
@@ -205,7 +269,7 @@ def analyze_with_claude(project_name, description, answers):
     if not api_key:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        st.warning("⚠️ Claude API key not found. Using fallback scoring method.")
+        st.warning("Claude API key not found. Using fallback scoring method.")
         return calculate_scores_fallback(answers)
 
     try:
@@ -262,7 +326,7 @@ Respond ONLY with valid JSON in this exact format:
         return result
 
     except Exception as e:
-        st.warning(f"⚠️ Claude analysis failed ({str(e)}). Using fallback scoring.")
+        st.warning(f"Claude analysis failed ({str(e)}). Using fallback scoring.")
         return calculate_scores_fallback(answers)
 
 def calculate_scores_fallback(answers):
@@ -356,8 +420,8 @@ def create_prioritization_chart(projects_df):
 
     fig.update_layout(
         title="AI Project Prioritization Matrix",
-        xaxis_title="Business Value →",
-        yaxis_title="Technical Feasibility →",
+        xaxis_title="Business Value ->",
+        yaxis_title="Technical Feasibility ->",
         xaxis=dict(range=[0, 10.5], dtick=1),
         yaxis=dict(range=[0, 10.5], dtick=1),
         height=600,
@@ -369,36 +433,36 @@ def create_prioritization_chart(projects_df):
     st.plotly_chart(fig, use_container_width=True)
 
 def main():
-    st.title("🎯 AI Project Prioritization Tool")
+    st.title("AI Project Prioritization Tool")
     st.markdown("### Intelligent scoring based on benchmarks and your intake questionnaire")
 
     # Sidebar for navigation
     with st.sidebar:
         st.header("Navigation")
         page = st.radio("Go to", [
-            "📊 Dashboard",
-            "➕ Add Project",
-            "📋 View All Projects",
-            "💾 Export Data",
-            "📂 Sessions"
+            "Dashboard",
+            "Add Project",
+            "View All Projects",
+            "Export Data",
+            "Sessions"
         ])
 
         st.markdown("---")
 
         # Show current session info
         if st.session_state.current_session_name:
-            st.success(f"📂 Session: **{st.session_state.current_session_name}**")
+            st.success(f"Session: **{st.session_state.current_session_name}**")
             st.caption(f"{len(st.session_state.projects)} project(s)")
         else:
             st.warning("No session loaded. Go to Sessions to create or load one.")
 
         st.markdown("---")
         st.markdown("### Legend")
-        st.markdown("🟢 **Low Hanging Fruit**: High value, high feasibility")
-        st.markdown("🟠 **Disruptive**: High value, lower feasibility")
-        st.markdown("🔵 **Incremental**: Other projects")
+        st.markdown("**Low Hanging Fruit**: High value, high feasibility")
+        st.markdown("**Disruptive**: High value, lower feasibility")
+        st.markdown("**Incremental**: Other projects")
 
-    if page == "📊 Dashboard":
+    if page == "Dashboard":
         st.header("Project Portfolio Overview")
 
         if st.session_state.projects:
@@ -422,11 +486,12 @@ def main():
             create_prioritization_chart(projects_df)
 
             # Top recommendations
-            st.markdown("### 🎯 Top Recommendations")
+            st.markdown("### Top Recommendations")
             top_projects = projects_df.nlargest(3, ['business_value', 'tech_feasibility'])
 
             for idx, project in top_projects.iterrows():
-                with st.expander(f"{'🟢' if project['category']=='low_hanging' else '🟠' if project['category']=='disruptive' else '🔵'} {project['project_name']}"):
+                label = "Low Hanging" if project['category']=='low_hanging' else "Disruptive" if project['category']=='disruptive' else "Incremental"
+                with st.expander(f"[{label}] {project['project_name']}"):
                     col1, col2 = st.columns(2)
                     with col1:
                         st.metric("Business Value", project['business_value'])
@@ -435,17 +500,17 @@ def main():
                         st.write("**Justification:**")
                         st.write(project['justification'])
         else:
-            st.info("👋 Welcome! Add your first AI project to get started.")
+            st.info("Welcome! Add your first AI project to get started.")
 
-    elif page == "➕ Add Project":
+    elif page == "Add Project":
         st.header("Add New AI Project")
 
-        if not st.session_state.current_session_name:
-            st.warning("Please create or load a session first (go to 📂 Sessions).")
+        if not st.session_state.current_session_id:
+            st.warning("Please create or load a session first (go to Sessions).")
             st.stop()
 
         with st.form("project_intake"):
-            st.subheader("📝 Basic Information")
+            st.subheader("Basic Information")
             answers = {}
 
             for q in INTAKE_QUESTIONS["basic_info"]:
@@ -455,22 +520,22 @@ def main():
                     answers[q["id"]] = st.text_area(q["question"], help=q.get("help"))
 
             st.markdown("---")
-            st.subheader("💼 Business Value Assessment")
+            st.subheader("Business Value Assessment")
             for q in INTAKE_QUESTIONS["business_value"]:
                 answers[q["id"]] = st.selectbox(q["question"], q["options"], key=q["id"])
 
             st.markdown("---")
-            st.subheader("⚙️ Technical Feasibility Assessment")
+            st.subheader("Technical Feasibility Assessment")
             for q in INTAKE_QUESTIONS["tech_feasibility"]:
                 answers[q["id"]] = st.selectbox(q["question"], q["options"], key=q["id"])
 
-            submitted = st.form_submit_button("🚀 Analyze & Add Project")
+            submitted = st.form_submit_button("Analyze & Add Project")
 
             if submitted:
                 if not answers["project_name"] or not answers["description"]:
                     st.error("Please provide project name and description.")
                 else:
-                    with st.spinner("🤖 Analyzing your project with AI benchmarking..."):
+                    with st.spinner("Analyzing your project with AI benchmarking..."):
                         result = analyze_with_claude(
                             answers["project_name"],
                             answers["description"],
@@ -485,29 +550,27 @@ def main():
                             "category": result["category"],
                             "justification": result["justification"],
                             "answers": answers,
-                            "timestamp": datetime.now().isoformat()
                         }
 
-                        st.session_state.projects.append(new_project)
+                        # Save to Supabase
+                        if db_add_project(st.session_state.current_session_id, new_project):
+                            # Reload projects from DB
+                            st.session_state.projects = db_load_session_projects(st.session_state.current_session_id)
+                            st.success(f"Project '{answers['project_name']}' added and saved to database!")
 
-                        # Auto-save to current session
-                        auto_save()
+                            # Show results
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Tech Feasibility", result["tech_feasibility"])
+                            with col2:
+                                st.metric("Business Value", result["business_value"])
+                            with col3:
+                                category_label = result['category'].replace('_', ' ').title()
+                                st.metric("Category", category_label)
 
-                        st.success(f"✅ Project '{answers['project_name']}' added and saved!")
+                            st.info(f"**Analysis:** {result['justification']}")
 
-                        # Show results
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Tech Feasibility", result["tech_feasibility"])
-                        with col2:
-                            st.metric("Business Value", result["business_value"])
-                        with col3:
-                            category_emoji = "🟢" if result["category"]=="low_hanging" else "🟠" if result["category"]=="disruptive" else "🔵"
-                            st.metric("Category", f"{category_emoji} {result['category'].replace('_', ' ').title()}")
-
-                        st.info(f"**Analysis:** {result['justification']}")
-
-    elif page == "📋 View All Projects":
+    elif page == "View All Projects":
         st.header("All Projects")
 
         if st.session_state.projects:
@@ -538,23 +601,24 @@ def main():
 
                 st.write(f"**Justification:** {project['justification']}")
 
-                if st.button(f"🗑️ Delete {selected_project}"):
-                    st.session_state.projects = [p for p in st.session_state.projects if p['project_name'] != selected_project]
-                    auto_save()
-                    st.rerun()
+                if st.button(f"Delete {selected_project}"):
+                    if db_delete_project(project.get("db_id"), st.session_state.current_session_id):
+                        st.session_state.projects = db_load_session_projects(st.session_state.current_session_id)
+                        st.rerun()
         else:
             st.info("No projects yet. Add your first project!")
 
-    elif page == "💾 Export Data":
+    elif page == "Export Data":
         st.header("Export Project Data")
 
         if st.session_state.projects:
             projects_df = pd.DataFrame(st.session_state.projects)
 
             # JSON export
-            json_str = json.dumps(st.session_state.projects, indent=2)
+            export_projects = [{k: v for k, v in p.items() if k != "db_id"} for p in st.session_state.projects]
+            json_str = json.dumps(export_projects, indent=2)
             st.download_button(
-                label="📥 Download as JSON",
+                label="Download as JSON",
                 data=json_str,
                 file_name=f"ai_projects_{datetime.now().strftime('%Y%m%d')}.json",
                 mime="application/json"
@@ -564,7 +628,7 @@ def main():
             csv_df = projects_df[['project_name', 'description', 'business_value', 'tech_feasibility', 'category', 'justification']]
             csv_str = csv_df.to_csv(index=False)
             st.download_button(
-                label="📥 Download as CSV",
+                label="Download as CSV",
                 data=csv_str,
                 file_name=f"ai_projects_{datetime.now().strftime('%Y%m%d')}.csv",
                 mime="text/csv"
@@ -572,12 +636,12 @@ def main():
         else:
             st.info("No projects to export yet.")
 
-    elif page == "📂 Sessions":
+    elif page == "Sessions":
         st.header("Session Management")
-        st.markdown("Save your work and come back to it anytime. Each session keeps all your projects organized.")
+        st.markdown("Save your work and come back to it anytime. Each session keeps all your projects organized in the cloud.")
 
         # --- Create New Session ---
-        st.subheader("🆕 Create New Session")
+        st.subheader("Create New Session")
         with st.form("new_session"):
             new_session_name = st.text_input(
                 "Session name",
@@ -586,47 +650,51 @@ def main():
             create_btn = st.form_submit_button("Create Session")
 
             if create_btn and new_session_name:
-                st.session_state.current_session_name = new_session_name
-                st.session_state.projects = []
-                save_session(new_session_name, [])
-                st.success(f"✅ Session '{new_session_name}' created! Go to ➕ Add Project to start adding use cases.")
-                st.rerun()
+                session_id = db_create_session(new_session_name)
+                if session_id:
+                    st.session_state.current_session_name = new_session_name
+                    st.session_state.current_session_id = session_id
+                    st.session_state.projects = []
+                    st.success(f"Session '{new_session_name}' created! Go to Add Project to start adding use cases.")
+                    st.rerun()
             elif create_btn:
                 st.error("Please enter a session name.")
 
         st.markdown("---")
 
         # --- Load Existing Session ---
-        st.subheader("📂 Saved Sessions")
-        sessions = get_all_sessions()
+        st.subheader("Saved Sessions")
+        sessions = db_get_all_sessions()
 
         if sessions:
-            for safe_name, info in sessions.items():
+            for session in sessions:
                 col1, col2, col3 = st.columns([3, 1, 1])
                 with col1:
-                    last_mod = datetime.fromisoformat(info['last_modified']).strftime("%b %d, %Y %H:%M")
-                    st.markdown(f"**{info['name']}**")
-                    st.caption(f"{info['project_count']} project(s) · Last modified: {last_mod}")
+                    last_mod = datetime.fromisoformat(session['last_modified']).strftime("%b %d, %Y %H:%M")
+                    st.markdown(f"**{session['name']}**")
+                    st.caption(f"{session['project_count']} project(s) | Last modified: {last_mod}")
                 with col2:
-                    if st.button("📂 Load", key=f"load_{safe_name}"):
-                        st.session_state.projects = load_session(safe_name)
-                        st.session_state.current_session_name = info['name']
-                        st.success(f"Loaded '{info['name']}' with {len(st.session_state.projects)} project(s)")
+                    if st.button("Load", key=f"load_{session['id']}"):
+                        st.session_state.projects = db_load_session_projects(session['id'])
+                        st.session_state.current_session_name = session['name']
+                        st.session_state.current_session_id = session['id']
+                        st.success(f"Loaded '{session['name']}' with {len(st.session_state.projects)} project(s)")
                         st.rerun()
                 with col3:
-                    if st.button("🗑️ Delete", key=f"del_{safe_name}"):
-                        delete_session(safe_name)
-                        if st.session_state.current_session_name == info['name']:
-                            st.session_state.current_session_name = None
-                            st.session_state.projects = []
-                        st.rerun()
+                    if st.button("Delete", key=f"del_{session['id']}"):
+                        if db_delete_session(session['id']):
+                            if st.session_state.current_session_id == session['id']:
+                                st.session_state.current_session_name = None
+                                st.session_state.current_session_id = None
+                                st.session_state.projects = []
+                            st.rerun()
 
                 st.markdown("---")
         else:
             st.info("No saved sessions yet. Create your first one above!")
 
         # --- Import Session from JSON ---
-        st.subheader("📤 Import Session")
+        st.subheader("Import Session")
         uploaded_file = st.file_uploader("Upload a previously exported JSON file", type="json")
         if uploaded_file:
             try:
@@ -643,15 +711,17 @@ def main():
                         projects = None
 
                     if projects is not None:
-                        save_session(import_name, projects)
-                        st.session_state.projects = projects
-                        st.session_state.current_session_name = import_name
-                        st.success(f"✅ Imported {len(projects)} project(s) into '{import_name}'")
-                        st.rerun()
+                        session_id = db_create_session(import_name)
+                        if session_id:
+                            for p in projects:
+                                db_add_project(session_id, p)
+                            st.session_state.projects = db_load_session_projects(session_id)
+                            st.session_state.current_session_name = import_name
+                            st.session_state.current_session_id = session_id
+                            st.success(f"Imported {len(projects)} project(s) into '{import_name}'")
+                            st.rerun()
             except Exception as e:
                 st.error(f"Failed to import: {str(e)}")
 
 if __name__ == "__main__":
     main()
-
-
