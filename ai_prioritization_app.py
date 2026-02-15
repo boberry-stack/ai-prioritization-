@@ -433,36 +433,36 @@ def create_prioritization_chart(projects_df):
     st.plotly_chart(fig, use_container_width=True)
 
 def main():
-    st.title("AI Project Prioritization Tool")
+    st.title("\U0001f3af AI Project Prioritization Tool")
     st.markdown("### Intelligent scoring based on benchmarks and your intake questionnaire")
 
     # Sidebar for navigation
     with st.sidebar:
         st.header("Navigation")
         page = st.radio("Go to", [
-            "Dashboard",
-            "Add Project",
-            "View All Projects",
-            "Export Data",
-            "Sessions"
+            "\U0001f4ca Dashboard",
+            "\u2795 Add Project",
+            "\U0001f4cb View All Projects",
+            "\U0001f4be Export Data",
+            "\U0001f4c2 Sessions"
         ])
 
         st.markdown("---")
 
         # Show current session info
         if st.session_state.current_session_name:
-            st.success(f"Session: **{st.session_state.current_session_name}**")
+            st.success(f"\U0001f4c2 Session: **{st.session_state.current_session_name}**")
             st.caption(f"{len(st.session_state.projects)} project(s)")
         else:
             st.warning("No session loaded. Go to Sessions to create or load one.")
 
         st.markdown("---")
         st.markdown("### Legend")
-        st.markdown("**Low Hanging Fruit**: High value, high feasibility")
-        st.markdown("**Disruptive**: High value, lower feasibility")
-        st.markdown("**Incremental**: Other projects")
+        st.markdown("\U0001f7e2 **Low Hanging Fruit**: High value, high feasibility")
+        st.markdown("\U0001f7e0 **Disruptive**: High value, lower feasibility")
+        st.markdown("\U0001f535 **Incremental**: Other projects")
 
-    if page == "Dashboard":
+    if page == "\U0001f4ca Dashboard":
         st.header("Project Portfolio Overview")
 
         if st.session_state.projects:
@@ -486,7 +486,7 @@ def main():
             create_prioritization_chart(projects_df)
 
             # Top recommendations
-            st.markdown("### Top Recommendations")
+            st.markdown("### \U0001f3af Top Recommendations")
             top_projects = projects_df.nlargest(3, ['business_value', 'tech_feasibility'])
 
             for idx, project in top_projects.iterrows():
@@ -500,9 +500,9 @@ def main():
                         st.write("**Justification:**")
                         st.write(project['justification'])
         else:
-            st.info("Welcome! Add your first AI project to get started.")
+            st.info("\U0001f44b Welcome! Add your first AI project to get started.")
 
-    elif page == "Add Project":
+    elif page == "\u2795 Add Project":
         st.header("Add New AI Project")
 
         if not st.session_state.current_session_id:
@@ -510,7 +510,7 @@ def main():
             st.stop()
 
         with st.form("project_intake"):
-            st.subheader("Basic Information")
+            st.subheader("\U0001f4dd Basic Information")
             answers = {}
 
             for q in INTAKE_QUESTIONS["basic_info"]:
@@ -520,22 +520,22 @@ def main():
                     answers[q["id"]] = st.text_area(q["question"], help=q.get("help"))
 
             st.markdown("---")
-            st.subheader("Business Value Assessment")
+            st.subheader("\U0001f4bc Business Value Assessment")
             for q in INTAKE_QUESTIONS["business_value"]:
                 answers[q["id"]] = st.selectbox(q["question"], q["options"], key=q["id"])
 
             st.markdown("---")
-            st.subheader("Technical Feasibility Assessment")
+            st.subheader("\u2699\ufe0f Technical Feasibility Assessment")
             for q in INTAKE_QUESTIONS["tech_feasibility"]:
                 answers[q["id"]] = st.selectbox(q["question"], q["options"], key=q["id"])
 
-            submitted = st.form_submit_button("Analyze & Add Project")
+            submitted = st.form_submit_button("\U0001f680 Analyze & Add Project")
 
             if submitted:
                 if not answers["project_name"] or not answers["description"]:
                     st.error("Please provide project name and description.")
                 else:
-                    with st.spinner("Analyzing your project with AI benchmarking..."):
+                    with st.spinner("\U0001f916 Analyzing your project with AI benchmarking..."):
                         result = analyze_with_claude(
                             answers["project_name"],
                             answers["description"],
@@ -556,7 +556,7 @@ def main():
                         if db_add_project(st.session_state.current_session_id, new_project):
                             # Reload projects from DB
                             st.session_state.projects = db_load_session_projects(st.session_state.current_session_id)
-                            st.success(f"Project '{answers['project_name']}' added and saved to database!")
+                            st.success(f"\u2705 Project '{answers['project_name']}' added and saved to database!")
 
                             # Show results
                             col1, col2, col3 = st.columns(3)
@@ -570,7 +570,7 @@ def main():
 
                             st.info(f"**Analysis:** {result['justification']}")
 
-    elif page == "View All Projects":
+    elif page == "\U0001f4cb View All Projects":
         st.header("All Projects")
 
         if st.session_state.projects:
@@ -601,14 +601,14 @@ def main():
 
                 st.write(f"**Justification:** {project['justification']}")
 
-                if st.button(f"Delete {selected_project}"):
+                if st.button(f"\U0001f5d1\ufe0f Delete {selected_project}"):
                     if db_delete_project(project.get("db_id"), st.session_state.current_session_id):
                         st.session_state.projects = db_load_session_projects(st.session_state.current_session_id)
                         st.rerun()
         else:
             st.info("No projects yet. Add your first project!")
 
-    elif page == "Export Data":
+    elif page == "\U0001f4be Export Data":
         st.header("Export Project Data")
 
         if st.session_state.projects:
@@ -618,7 +618,7 @@ def main():
             export_projects = [{k: v for k, v in p.items() if k != "db_id"} for p in st.session_state.projects]
             json_str = json.dumps(export_projects, indent=2)
             st.download_button(
-                label="Download as JSON",
+                label="\U0001f4e5 Download as JSON",
                 data=json_str,
                 file_name=f"ai_projects_{datetime.now().strftime('%Y%m%d')}.json",
                 mime="application/json"
@@ -628,7 +628,7 @@ def main():
             csv_df = projects_df[['project_name', 'description', 'business_value', 'tech_feasibility', 'category', 'justification']]
             csv_str = csv_df.to_csv(index=False)
             st.download_button(
-                label="Download as CSV",
+                label="\U0001f4e5 Download as CSV",
                 data=csv_str,
                 file_name=f"ai_projects_{datetime.now().strftime('%Y%m%d')}.csv",
                 mime="text/csv"
@@ -636,12 +636,12 @@ def main():
         else:
             st.info("No projects to export yet.")
 
-    elif page == "Sessions":
+    elif page == "\U0001f4c2 Sessions":
         st.header("Session Management")
         st.markdown("Save your work and come back to it anytime. Each session keeps all your projects organized in the cloud.")
 
         # --- Create New Session ---
-        st.subheader("Create New Session")
+        st.subheader("\U0001f195 Create New Session")
         with st.form("new_session"):
             new_session_name = st.text_input(
                 "Session name",
@@ -655,7 +655,7 @@ def main():
                     st.session_state.current_session_name = new_session_name
                     st.session_state.current_session_id = session_id
                     st.session_state.projects = []
-                    st.success(f"Session '{new_session_name}' created! Go to Add Project to start adding use cases.")
+                    st.success(f"\u2705 Session '{new_session_name}' created! Go to \u2795 Add Project to start adding use cases.")
                     st.rerun()
             elif create_btn:
                 st.error("Please enter a session name.")
@@ -663,7 +663,7 @@ def main():
         st.markdown("---")
 
         # --- Load Existing Session ---
-        st.subheader("Saved Sessions")
+        st.subheader("\U0001f4c2 Saved Sessions")
         sessions = db_get_all_sessions()
 
         if sessions:
@@ -674,14 +674,14 @@ def main():
                     st.markdown(f"**{session['name']}**")
                     st.caption(f"{session['project_count']} project(s) | Last modified: {last_mod}")
                 with col2:
-                    if st.button("Load", key=f"load_{session['id']}"):
+                    if st.button("\U0001f4c2 Load", key=f"load_{session['id']}"):
                         st.session_state.projects = db_load_session_projects(session['id'])
                         st.session_state.current_session_name = session['name']
                         st.session_state.current_session_id = session['id']
                         st.success(f"Loaded '{session['name']}' with {len(st.session_state.projects)} project(s)")
                         st.rerun()
                 with col3:
-                    if st.button("Delete", key=f"del_{session['id']}"):
+                    if st.button("\U0001f5d1\ufe0f Delete", key=f"del_{session['id']}"):
                         if db_delete_session(session['id']):
                             if st.session_state.current_session_id == session['id']:
                                 st.session_state.current_session_name = None
@@ -694,7 +694,7 @@ def main():
             st.info("No saved sessions yet. Create your first one above!")
 
         # --- Import Session from JSON ---
-        st.subheader("Import Session")
+        st.subheader("\U0001f4e4 Import Session")
         uploaded_file = st.file_uploader("Upload a previously exported JSON file", type="json")
         if uploaded_file:
             try:
