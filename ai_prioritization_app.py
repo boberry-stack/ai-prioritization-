@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import json
 from datetime import datetime
+from pathlib import Path
 import anthropic
 import os
 
@@ -13,11 +14,77 @@ st.set_page_config(
     layout="wide"
 )
 
-# Initialize session state
+# --- Persistent Storage ---
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+SESSIONS_FILE = DATA_DIR / "sessions_index.json"
+
+def get_all_sessions():
+    """Load the list of saved sessions"""
+    if SESSIONS_FILE.exists():
+        with open(SESSIONS_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_sessions_index(sessions):
+    """Save the sessions index"""
+    with open(SESSIONS_FILE, "w") as f:
+        json.dump(sessions, f, indent=2)
+
+def save_session(session_name, projects):
+    """Save a session's projects to a JSON file"""
+    safe_name = session_name.replace(" ", "_").lower()
+    session_file = DATA_DIR / f"session_{safe_name}.json"
+
+    session_data = {
+        "session_name": session_name,
+        "projects": projects,
+        "last_modified": datetime.now().isoformat()
+    }
+
+    with open(session_file, "w") as f:
+        json.dump(session_data, f, indent=2)
+
+    # Update sessions index
+    sessions = get_all_sessions()
+    sessions[safe_name] = {
+        "name": session_name,
+        "file": str(session_file),
+        "project_count": len(projects),
+        "last_modified": session_data["last_modified"]
+    }
+    save_sessions_index(sessions)
+
+def load_session(safe_name):
+    """Load a session's projects from a JSON file"""
+    session_file = DATA_DIR / f"session_{safe_name}.json"
+    if session_file.exists():
+        with open(session_file, "r") as f:
+            data = json.load(f)
+            return data.get("projects", [])
+    return []
+
+def delete_session(safe_name):
+    """Delete a saved session"""
+    session_file = DATA_DIR / f"session_{safe_name}.json"
+    if session_file.exists():
+        session_file.unlink()
+    sessions = get_all_sessions()
+    sessions.pop(safe_name, None)
+    save_sessions_index(sessions)
+
+def auto_save():
+    """Auto-save current session if a session is active"""
+    if st.session_state.get("current_session_name") and st.session_state.projects:
+        save_session(st.session_state.current_session_name, st.session_state.projects)
+
+# --- Initialize session state ---
 if 'projects' not in st.session_state:
     st.session_state.projects = []
 if 'current_project' not in st.session_state:
     st.session_state.current_project = {}
+if 'current_session_name' not in st.session_state:
+    st.session_state.current_session_name = None
 
 # Benchmark use cases for reference
 BENCHMARK_USE_CASES = {
@@ -128,16 +195,22 @@ INTAKE_QUESTIONS = {
 
 def analyze_with_claude(project_name, description, answers):
     """Use Claude to intelligently score the project based on benchmarks and answers"""
-    
-    # Check if API key is available
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+
+    # Check if API key is available (try Streamlit secrets first, then env var)
+    api_key = None
+    try:
+        api_key = st.secrets.get("ANTHROPIC_API_KEY")
+    except Exception:
+        pass
+    if not api_key:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         st.warning("⚠️ Claude API key not found. Using fallback scoring method.")
         return calculate_scores_fallback(answers)
-    
+
     try:
         client = anthropic.Anthropic(api_key=api_key)
-        
+
         prompt = f"""Analyze this AI project and provide scoring based on benchmarks and the intake questionnaire.
 
 Project Name: {project_name}
@@ -176,18 +249,18 @@ Respond ONLY with valid JSON in this exact format:
                 {"role": "user", "content": prompt}
             ]
         )
-        
+
         response_text = message.content[0].text.strip()
-        
+
         # Extract JSON from response
         if "```json" in response_text:
             response_text = response_text.split("```json")[1].split("```")[0].strip()
         elif "```" in response_text:
             response_text = response_text.split("```")[1].split("```")[0].strip()
-        
+
         result = json.loads(response_text)
         return result
-        
+
     except Exception as e:
         st.warning(f"⚠️ Claude analysis failed ({str(e)}). Using fallback scoring.")
         return calculate_scores_fallback(answers)
@@ -196,23 +269,23 @@ def calculate_scores_fallback(answers):
     """Fallback scoring method if Claude API is not available"""
     business_scores = []
     tech_scores = []
-    
+
     for category, questions in INTAKE_QUESTIONS.items():
         if category == "basic_info":
             continue
-        
+
         for q in questions:
             if q["id"] in answers and "score_map" in q:
                 score = q["score_map"].get(answers[q["id"]], 5)
-                
+
                 if category == "business_value":
                     business_scores.append(score)
                 elif category == "tech_feasibility":
                     tech_scores.append(score)
-    
+
     tech_feasibility = round(sum(tech_scores) / len(tech_scores), 1) if tech_scores else 5
     business_value = round(sum(business_scores) / len(business_scores), 1) if business_scores else 5
-    
+
     # Determine category
     if tech_feasibility >= 7 and business_value >= 7:
         category = "low_hanging"
@@ -220,7 +293,7 @@ def calculate_scores_fallback(answers):
         category = "disruptive"
     else:
         category = "incremental"
-    
+
     return {
         "tech_feasibility": tech_feasibility,
         "business_value": business_value,
@@ -230,23 +303,23 @@ def calculate_scores_fallback(answers):
 
 def create_prioritization_chart(projects_df):
     """Create interactive plotly chart"""
-    
+
     if projects_df.empty:
         st.info("No projects to display. Add your first project using the form below.")
         return
-    
+
     # Define colors
     color_map = {
         "low_hanging": "#10b981",  # Green
         "disruptive": "#f59e0b",   # Orange
         "incremental": "#6366f1"   # Blue
     }
-    
+
     fig = go.Figure()
-    
+
     for category in ["low_hanging", "disruptive", "incremental"]:
         df_filtered = projects_df[projects_df['category'] == category]
-        
+
         if not df_filtered.empty:
             fig.add_trace(go.Scatter(
                 x=df_filtered['business_value'],
@@ -266,13 +339,13 @@ def create_prioritization_chart(projects_df):
                              'Tech Feasibility: %{y}<br>' +
                              '<extra></extra>'
             ))
-    
+
     # Add quadrant lines
     fig.add_hline(y=5, line_dash="dash", line_color="gray", opacity=0.5)
     fig.add_vline(x=5, line_dash="dash", line_color="gray", opacity=0.5)
-    
+
     # Add quadrant labels
-    fig.add_annotation(x=2.5, y=9, text="High Effort<br>Low Value", showarrow=False, 
+    fig.add_annotation(x=2.5, y=9, text="High Effort<br>Low Value", showarrow=False,
                       font=dict(size=12, color="gray"), opacity=0.5)
     fig.add_annotation(x=7.5, y=9, text="Quick Wins", showarrow=False,
                       font=dict(size=14, color="#10b981", family="Arial Black"), opacity=0.7)
@@ -280,7 +353,7 @@ def create_prioritization_chart(projects_df):
                       font=dict(size=12, color="gray"), opacity=0.5)
     fig.add_annotation(x=7.5, y=2, text="Strategic<br>Bets", showarrow=False,
                       font=dict(size=12, color="#f59e0b"), opacity=0.7)
-    
+
     fig.update_layout(
         title="AI Project Prioritization Matrix",
         xaxis_title="Business Value →",
@@ -292,30 +365,45 @@ def create_prioritization_chart(projects_df):
         plot_bgcolor='rgba(250,250,250,0.8)',
         hovermode='closest'
     )
-    
+
     st.plotly_chart(fig, use_container_width=True)
 
 def main():
     st.title("🎯 AI Project Prioritization Tool")
     st.markdown("### Intelligent scoring based on benchmarks and your intake questionnaire")
-    
+
     # Sidebar for navigation
     with st.sidebar:
         st.header("Navigation")
-        page = st.radio("Go to", ["📊 Dashboard", "➕ Add Project", "📋 View All Projects", "💾 Export Data"])
-        
+        page = st.radio("Go to", [
+            "📊 Dashboard",
+            "➕ Add Project",
+            "📋 View All Projects",
+            "💾 Export Data",
+            "📂 Sessions"
+        ])
+
+        st.markdown("---")
+
+        # Show current session info
+        if st.session_state.current_session_name:
+            st.success(f"📂 Session: **{st.session_state.current_session_name}**")
+            st.caption(f"{len(st.session_state.projects)} project(s)")
+        else:
+            st.warning("No session loaded. Go to Sessions to create or load one.")
+
         st.markdown("---")
         st.markdown("### Legend")
         st.markdown("🟢 **Low Hanging Fruit**: High value, high feasibility")
         st.markdown("🟠 **Disruptive**: High value, lower feasibility")
         st.markdown("🔵 **Incremental**: Other projects")
-    
+
     if page == "📊 Dashboard":
         st.header("Project Portfolio Overview")
-        
+
         if st.session_state.projects:
             projects_df = pd.DataFrame(st.session_state.projects)
-            
+
             # Summary metrics
             col1, col2, col3, col4 = st.columns(4)
             with col1:
@@ -329,14 +417,14 @@ def main():
             with col4:
                 avg_value = projects_df['business_value'].mean()
                 st.metric("Avg Business Value", f"{avg_value:.1f}")
-            
+
             st.markdown("---")
             create_prioritization_chart(projects_df)
-            
+
             # Top recommendations
             st.markdown("### 🎯 Top Recommendations")
             top_projects = projects_df.nlargest(3, ['business_value', 'tech_feasibility'])
-            
+
             for idx, project in top_projects.iterrows():
                 with st.expander(f"{'🟢' if project['category']=='low_hanging' else '🟠' if project['category']=='disruptive' else '🔵'} {project['project_name']}"):
                     col1, col2 = st.columns(2)
@@ -348,32 +436,36 @@ def main():
                         st.write(project['justification'])
         else:
             st.info("👋 Welcome! Add your first AI project to get started.")
-    
+
     elif page == "➕ Add Project":
         st.header("Add New AI Project")
-        
+
+        if not st.session_state.current_session_name:
+            st.warning("Please create or load a session first (go to 📂 Sessions).")
+            st.stop()
+
         with st.form("project_intake"):
             st.subheader("📝 Basic Information")
             answers = {}
-            
+
             for q in INTAKE_QUESTIONS["basic_info"]:
                 if q["type"] == "text":
                     answers[q["id"]] = st.text_input(q["question"], help=q.get("help"))
                 elif q["type"] == "textarea":
                     answers[q["id"]] = st.text_area(q["question"], help=q.get("help"))
-            
+
             st.markdown("---")
             st.subheader("💼 Business Value Assessment")
             for q in INTAKE_QUESTIONS["business_value"]:
                 answers[q["id"]] = st.selectbox(q["question"], q["options"], key=q["id"])
-            
+
             st.markdown("---")
             st.subheader("⚙️ Technical Feasibility Assessment")
             for q in INTAKE_QUESTIONS["tech_feasibility"]:
                 answers[q["id"]] = st.selectbox(q["question"], q["options"], key=q["id"])
-            
+
             submitted = st.form_submit_button("🚀 Analyze & Add Project")
-            
+
             if submitted:
                 if not answers["project_name"] or not answers["description"]:
                     st.error("Please provide project name and description.")
@@ -384,7 +476,7 @@ def main():
                             answers["description"],
                             answers
                         )
-                        
+
                         new_project = {
                             "project_name": answers["project_name"],
                             "description": answers["description"],
@@ -395,11 +487,14 @@ def main():
                             "answers": answers,
                             "timestamp": datetime.now().isoformat()
                         }
-                        
+
                         st.session_state.projects.append(new_project)
-                        
-                        st.success(f"✅ Project '{answers['project_name']}' added successfully!")
-                        
+
+                        # Auto-save to current session
+                        auto_save()
+
+                        st.success(f"✅ Project '{answers['project_name']}' added and saved!")
+
                         # Show results
                         col1, col2, col3 = st.columns(3)
                         with col1:
@@ -409,30 +504,30 @@ def main():
                         with col3:
                             category_emoji = "🟢" if result["category"]=="low_hanging" else "🟠" if result["category"]=="disruptive" else "🔵"
                             st.metric("Category", f"{category_emoji} {result['category'].replace('_', ' ').title()}")
-                        
+
                         st.info(f"**Analysis:** {result['justification']}")
-    
+
     elif page == "📋 View All Projects":
         st.header("All Projects")
-        
+
         if st.session_state.projects:
             projects_df = pd.DataFrame(st.session_state.projects)
-            
+
             # Display table
             display_df = projects_df[['project_name', 'business_value', 'tech_feasibility', 'category']].copy()
             display_df.columns = ['Project Name', 'Business Value', 'Tech Feasibility', 'Category']
             display_df['Category'] = display_df['Category'].str.replace('_', ' ').str.title()
-            
+
             st.dataframe(display_df, use_container_width=True)
-            
+
             # Details
             st.markdown("### Project Details")
             project_names = [p['project_name'] for p in st.session_state.projects]
             selected_project = st.selectbox("Select a project to view details", project_names)
-            
+
             if selected_project:
                 project = next(p for p in st.session_state.projects if p['project_name'] == selected_project)
-                
+
                 col1, col2 = st.columns(2)
                 with col1:
                     st.write(f"**Description:** {project['description']}")
@@ -440,21 +535,22 @@ def main():
                 with col2:
                     st.metric("Business Value", project['business_value'])
                     st.metric("Tech Feasibility", project['tech_feasibility'])
-                
+
                 st.write(f"**Justification:** {project['justification']}")
-                
+
                 if st.button(f"🗑️ Delete {selected_project}"):
                     st.session_state.projects = [p for p in st.session_state.projects if p['project_name'] != selected_project]
+                    auto_save()
                     st.rerun()
         else:
             st.info("No projects yet. Add your first project!")
-    
+
     elif page == "💾 Export Data":
         st.header("Export Project Data")
-        
+
         if st.session_state.projects:
             projects_df = pd.DataFrame(st.session_state.projects)
-            
+
             # JSON export
             json_str = json.dumps(st.session_state.projects, indent=2)
             st.download_button(
@@ -463,7 +559,7 @@ def main():
                 file_name=f"ai_projects_{datetime.now().strftime('%Y%m%d')}.json",
                 mime="application/json"
             )
-            
+
             # CSV export
             csv_df = projects_df[['project_name', 'description', 'business_value', 'tech_feasibility', 'category', 'justification']]
             csv_str = csv_df.to_csv(index=False)
@@ -476,5 +572,86 @@ def main():
         else:
             st.info("No projects to export yet.")
 
+    elif page == "📂 Sessions":
+        st.header("Session Management")
+        st.markdown("Save your work and come back to it anytime. Each session keeps all your projects organized.")
+
+        # --- Create New Session ---
+        st.subheader("🆕 Create New Session")
+        with st.form("new_session"):
+            new_session_name = st.text_input(
+                "Session name",
+                placeholder="e.g., Q1 2026 AI Roadmap, Marketing AI Projects..."
+            )
+            create_btn = st.form_submit_button("Create Session")
+
+            if create_btn and new_session_name:
+                st.session_state.current_session_name = new_session_name
+                st.session_state.projects = []
+                save_session(new_session_name, [])
+                st.success(f"✅ Session '{new_session_name}' created! Go to ➕ Add Project to start adding use cases.")
+                st.rerun()
+            elif create_btn:
+                st.error("Please enter a session name.")
+
+        st.markdown("---")
+
+        # --- Load Existing Session ---
+        st.subheader("📂 Saved Sessions")
+        sessions = get_all_sessions()
+
+        if sessions:
+            for safe_name, info in sessions.items():
+                col1, col2, col3 = st.columns([3, 1, 1])
+                with col1:
+                    last_mod = datetime.fromisoformat(info['last_modified']).strftime("%b %d, %Y %H:%M")
+                    st.markdown(f"**{info['name']}**")
+                    st.caption(f"{info['project_count']} project(s) · Last modified: {last_mod}")
+                with col2:
+                    if st.button("📂 Load", key=f"load_{safe_name}"):
+                        st.session_state.projects = load_session(safe_name)
+                        st.session_state.current_session_name = info['name']
+                        st.success(f"Loaded '{info['name']}' with {len(st.session_state.projects)} project(s)")
+                        st.rerun()
+                with col3:
+                    if st.button("🗑️ Delete", key=f"del_{safe_name}"):
+                        delete_session(safe_name)
+                        if st.session_state.current_session_name == info['name']:
+                            st.session_state.current_session_name = None
+                            st.session_state.projects = []
+                        st.rerun()
+
+                st.markdown("---")
+        else:
+            st.info("No saved sessions yet. Create your first one above!")
+
+        # --- Import Session from JSON ---
+        st.subheader("📤 Import Session")
+        uploaded_file = st.file_uploader("Upload a previously exported JSON file", type="json")
+        if uploaded_file:
+            try:
+                imported_data = json.load(uploaded_file)
+                import_name = st.text_input("Name for imported session", value=f"Imported {datetime.now().strftime('%b %d')}")
+                if st.button("Import"):
+                    # Handle both raw project lists and session-format files
+                    if isinstance(imported_data, list):
+                        projects = imported_data
+                    elif isinstance(imported_data, dict) and "projects" in imported_data:
+                        projects = imported_data["projects"]
+                    else:
+                        st.error("Unrecognized file format.")
+                        projects = None
+
+                    if projects is not None:
+                        save_session(import_name, projects)
+                        st.session_state.projects = projects
+                        st.session_state.current_session_name = import_name
+                        st.success(f"✅ Imported {len(projects)} project(s) into '{import_name}'")
+                        st.rerun()
+            except Exception as e:
+                st.error(f"Failed to import: {str(e)}")
+
 if __name__ == "__main__":
     main()
+
+
